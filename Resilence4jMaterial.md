@@ -1564,6 +1564,17 @@ Resilence4J Depedency in pom.xml:
 Implementation of Resilence4J: only for Functional Style;
 .........................................................
 
+General Steps for all Patterns:
+
+1.Create configuration object
+2.Create a Registry Object
+3.Create or get a Resilence4J Object(Bulkhead,retry....)
+4.Code the remote Operation as a lambada expression or a functional interface    direct implementation, a normal java method
+5.create a decorator or wrapper around the code from step 4 using one helper methods
+6.call the decorator method to invoke the remote operation.
+   -get,apply...
+
+
 Steps:
 
 Creation:
@@ -1613,19 +1624,1274 @@ BulkHeadDecorators:
  -CompletionStage
 
 CheckedFunction0<String> decoratedSupplier=BulkHead.decorateCheckedSupplier(bulkhead,()->{
-     //call external api
+     //call external api /remote api
      return restTemplate.forObject(url);
  });
 
 Step 4.2 : Execution : Handle Response: It could either SUCCESS /FAILURE
+
+decoratedSupplier.get()---Triggers call.
+
+Handling Resultion
 Try<String> result=Try.Of(decoratedSupplier)
 result
   .Onsuccess()
   .onFailure()
   .recover()
 ..............................................................................
+Decorator Interfaces:
+
+1.Callable and Runnable:
+- Where you want execute async operations(Multi threaded env).
+
+Callable vs Runnable:
+Both interfaces are designed to represent a task that can be executed by multiple threads. Runnable tasks can be run using the Thread class or ExecutorService whereas Callables can be run only using the latter.
+
+2.Supplier
+     -Return result, no input
+3.Consumer
+    -No Return, it takes output.
+decorate*
+  decorateSupplier,decorateConsumer .....
+
+  OurApplication will call remote Service, 
+     -may give result.
+     -may throw exeception
+         -UnCheckedException
+              decorate* api you can use
+         -CheckedException
+              deccorateChecked*
+        you assume that remote service may throw, checked Exception.
+    
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Bulk Head:
+ Limit the number of concurrent remote operations.
+
+ Concurrent : no of threads : Each thread considered one request
+
+ Litmit the number of simultaneous requests to remote operations.
+
+ Basic Bulkhead Config
+ package com.example.consumer;
+
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+@RestController
+public class ServiceRequestController {
+    private final RestTemplate restTemplate;
+    private final String providerUri;
+    //BulkHead declaration
+    private final Bulkhead bulkhead;
+
+    public ServiceRequestController(RestTemplate restTemplate, @Value("${provider.uri}") String providerUri, @Value("${maxConcurrent}") int maxConcurrent) {
+        this.restTemplate = restTemplate;
+        this.providerUri = providerUri;
+        //maxConcurrent value limits no of concurrent users allow to invoke remote api
+        this.bulkhead = createBulkhead(maxConcurrent);
+
+    }
+
+    //configuration methods
+    private Bulkhead createBulkhead(int maxConcurrent) {
+        //Configuration
+        BulkheadConfig bulkheadConfig = BulkheadConfig
+                .custom()
+                .maxConcurrentCalls(maxConcurrent)
+                .build();
+        //Registry if want ; optional
+        //create BulkHead object with configuration.
+        Bulkhead bulkhead = Bulkhead.of("bulkhead-app", bulkheadConfig);
+        return bulkhead;
+    }
+
+    @GetMapping()
+    public String okay() {
+        return "The message of Provider Api  " + restTemplate.getForObject(providerUri, String.class);
+    }
+
+}
+
+Events:
 
 
+package com.example.consumer;
+
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+@RestController
+public class ServiceRequestController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServiceRequestController.class);
+    private final RestTemplate restTemplate;
+    private final String providerUri;
+    //BulkHead declaration
+    private final Bulkhead bulkhead;
+
+
+    public ServiceRequestController(RestTemplate restTemplate, @Value("${provider.uri}") String providerUri, @Value("${maxConcurrent}") int maxConcurrent) {
+        this.restTemplate = restTemplate;
+        this.providerUri = providerUri;
+        //maxConcurrent value limits no of concurrent users allow to invoke remote api
+        this.bulkhead = createBulkhead(maxConcurrent);
+    }
+
+    //configuration methods
+    private Bulkhead createBulkhead(int maxConcurrent) {
+        //Configuration
+        BulkheadConfig bulkheadConfig = BulkheadConfig
+                .custom()
+                .maxConcurrentCalls(maxConcurrent)
+                .build();
+        //Registry if want ; optional
+        //create BulkHead object with configuration.
+        Bulkhead bulkhead = Bulkhead.of("bulkhead-app", bulkheadConfig);
+
+        //add bulk head events to watch, bulk head operations.
+        bulkhead.getEventPublisher()
+                .onCallPermitted(event -> LOGGER.info("Call Permitted"))
+                .onCallRejected(event -> LOGGER.info("Call Rejected"))
+                .onCallFinished(event -> LOGGER.info("Call Completed"));
+
+        return bulkhead;
+    }
+
+    @GetMapping()
+    public String okay() {
+        return "The message of Provider Api  " + restTemplate.getForObject(providerUri, String.class);
+    }
+    //End
+
+
+}
+
+Retry: Retry failed remote operations/request automatically 
+..........................................................
+
+When to use Retry?
+
+- Sending an HTTP Request to a REST Point
+- Calling a RPC or Web Service
+- Reading and writing  data to/from a datastore-sql,nosql
+- Sending and Receiving messages from message brokers-Rabbitmql,kafka..
+
+We can call any api, operations are subject fail.
+
+We have two options when a remote operation fails
+  - immediately return an error to client
+  - we may retry the operation.
+
+  package com.example.consumer;
+
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
+import io.vavr.CheckedFunction0;
+import io.vavr.control.Try;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+import java.time.Duration;
+
+@RestController
+public class ServiceRequestController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServiceRequestController.class);
+    private final RestTemplate restTemplate;
+    private final String providerUri;
+    //BulkHead declaration
+    private final Bulkhead bulkhead;
+
+    //Retry configuration
+    private final Retry retry;
+
+    public ServiceRequestController(RestTemplate restTemplate, @Value("${provider.uri}") String providerUri, @Value("${maxConcurrent}") int maxConcurrent) {
+        this.restTemplate = restTemplate;
+        this.providerUri = providerUri;
+        //maxConcurrent value limits no of concurrent users allow to invoke remote api
+        this.bulkhead = createBulkhead(maxConcurrent);
+        this.retry = createRetry();
+    }
+
+    private Retry createRetry() {
+        //Retry config
+        RetryConfig config = RetryConfig
+                .custom()
+                .maxAttempts(25)
+                .waitDuration(Duration.ofSeconds(2))
+                .build();
+
+        //Retry Registry
+        RetryRegistry registry = RetryRegistry.of(config);
+
+        //Retry Instance
+        Retry retry = registry.retry("app-retry");
+
+        retry.getEventPublisher()
+                .onRetry(r -> System.out.println("Retrying..... : " + r.getNumberOfRetryAttempts()))
+                .onSuccess(e -> System.out.println("Retry success!!! : " + e.getNumberOfRetryAttempts()))
+                .onError(e -> System.out.println("Retry error : " + e.getNumberOfRetryAttempts()));
+
+        return retry;
+    }
+
+    //configuration methods
+    private Bulkhead createBulkhead(int maxConcurrent) {
+        //Configuration
+        BulkheadConfig bulkheadConfig = BulkheadConfig
+                .custom()
+                .maxConcurrentCalls(maxConcurrent)
+                .build();
+        //Registry if want ; optional
+        //create BulkHead object with configuration.
+        Bulkhead bulkhead = Bulkhead.of("bulkhead-app", bulkheadConfig);
+
+        //add bulk head events to watch, bulk head operations.
+        bulkhead.getEventPublisher()
+                .onCallPermitted(event -> LOGGER.info("Call Permitted"))
+                .onCallRejected(event -> LOGGER.info("Call Rejected"))
+                .onCallFinished(event -> LOGGER.info("Call Completed"));
+
+        return bulkhead;
+    }
+
+    @GetMapping()
+    public String okay() {
+        return "The message of Provider Api  " + restTemplate.getForObject(providerUri, String.class);
+    }
+
+    //End point to simulate bulk head
+    @GetMapping("/bulkhead")
+    public String bulkHeadEndPoint() {
+        //decoration only
+        CheckedFunction0<String> someServiceCall = Bulkhead.decorateCheckedSupplier(bulkhead, () -> {
+            //wrap remote api call.
+            return "The message was " + restTemplate.getForObject(providerUri + "/slow", String.class);
+        });
+        //Result Handler : you may get result or Failure
+        Try<String> result = Try
+                .of(someServiceCall)
+                .recover((throwable) -> "This is a bulkhead fallback : You may return cached Response");
+        //execute the method
+        return result.get(); //which tri
+
+    }
+
+    //Retry end point
+
+    @GetMapping("/retry")
+    public String retry() throws Exception {
+        CheckedFunction0<String> retryableSupplier = Retry.decorateCheckedSupplier(retry, () -> {
+            return "The message was " + restTemplate.getForObject(providerUri, String.class);
+        });
+        Try<String> result = Try.of(retryableSupplier)
+                .recover((throwable) -> "Hello world from recovery function");
+        return result.get();
+    }
+
+
+}
+.................................................................................
+
+Time Limitter : Timeout:
+.......................
+Setting a limit on the amount of time we are willing to wait for an operation to complete is called time limitig.
+if operation does not complete within the time we specifed, we want to be notified about a timeout error.
+This other wise called as "setting a deadline".
+
+Why Timeout?
+- users /clients/ programs/services not need wait indefinitely.
+
+
+    @GetMapping("/timeout")
+    public String timeoutEndPoint() throws Exception {
+        //Timeout code has to be wrapped inside Future.
+        String result = timeLimiter.executeFutureSupplier(
+                () -> CompletableFuture.supplyAsync(() -> "The message was " + restTemplate.getForObject(providerUri + "/slow", String.class)));
+        return result;
+    }
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+CircuitBreaker:
+
+State:
+OPEN
+  -For handling failures
+CLOSED
+ -For Handling success
+HALF-OPEN
+ -transition 
+
+CB : 
+ -Will take decision , that when to open or close circuit
+
+CB can handle
+
+->failure calls
+failureRateThreshold : 50
+    When the failure rate is equal or greater than the threshold the CircuitBreaker transitions to open and starts short-circuiting calls.
+CLOSED ----OPEN---|
+->slow calls
+
+Exception and CircuitBreaker:
+
+Flow
+1
+Service A----calls----CB-------ServiceB
+
+2.
+Service A----calls----CB<---throw Exception----ServiceB
+   CB will open , Starts Handling Failures.
+
+3.As a biz owner , you have to decide , Should i Open Circuit for all Exceptions
+  or not.
+    private final CircuitBreaker circuitBreaker;
+
+     private CircuitBreaker createCircuitBreaker() {
+        CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom().failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofMillis(20000)).build();
+        CircuitBreaker circuitBreaker = CircuitBreaker.of("resilience-provider", circuitBreakerConfig);
+
+        circuitBreaker.getEventPublisher().onSuccess(event -> LOGGER.info("Call success via circuit breaker"))
+                .onCallNotPermitted(event -> LOGGER.info("Call denied by circuit breaker"))
+                .onError(event -> LOGGER.info("Call failed via circuit breaker"));
+        return circuitBreaker;
+    }
+
+  @GetMapping("/circuitbreaker")
+    public String circuitBreakerFail(@RequestParam boolean shouldFail) {
+        if (shouldFail) {
+            return callServiceViaCircuitBreaker("/error");
+        } else {
+            return callServiceViaCircuitBreaker("/");
+        }
+    }
+
+&&&
+Full Code:
+package com.example.consumer;
+
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
+import io.github.resilience4j.timelimiter.TimeLimiter;
+import io.github.resilience4j.timelimiter.TimeLimiterConfig;
+import io.vavr.CheckedFunction0;
+import io.vavr.control.Try;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+
+@RestController
+public class ServiceRequestController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServiceRequestController.class);
+    private final RestTemplate restTemplate;
+    private final String providerUri;
+    //BulkHead declaration
+    private final Bulkhead bulkhead;
+    //Retry configuration
+    private final Retry retry;
+    //Timeout
+    private final TimeLimiter timeLimiter;
+
+    //CB
+    private final CircuitBreaker circuitBreaker;
+
+    public ServiceRequestController(RestTemplate restTemplate, @Value("${provider.uri}") String providerUri, @Value("${maxConcurrent}") int maxConcurrent) {
+        this.restTemplate = restTemplate;
+        this.providerUri = providerUri;
+        //maxConcurrent value limits no of concurrent users allow to invoke remote api
+        this.bulkhead = createBulkhead(maxConcurrent);
+        this.retry = createRetry();
+        this.timeLimiter = createTimeLimiter();
+        this.circuitBreaker = createCircuitBreaker();
+    }
+    private CircuitBreaker createCircuitBreaker() {
+        CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom().failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofMillis(20000)).build();
+        CircuitBreaker circuitBreaker = CircuitBreaker.of("resilience-provider", circuitBreakerConfig);
+
+        circuitBreaker.getEventPublisher().onSuccess(event -> LOGGER.info("Call success via circuit breaker"))
+                .onCallNotPermitted(event -> LOGGER.info("Call denied by circuit breaker"))
+                .onError(event -> LOGGER.info("Call failed via circuit breaker"));
+        return circuitBreaker;
+    }
+
+    private TimeLimiter createTimeLimiter() {
+
+        //Time limitter config
+        TimeLimiterConfig config = TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofMillis(6000))
+                .build();
+
+        //Timer limitter
+        TimeLimiter timeLimiter = TimeLimiter.of("timelimiter-app", config);
+
+
+        timeLimiter.getEventPublisher().onSuccess(event -> {
+            LOGGER.info("Timeout call is going");
+        }).onTimeout(event -> {
+            LOGGER.info("Timeout");
+        }).onError(err -> {
+            LOGGER.info("Error " + err.toString());
+        });
+
+        return timeLimiter;
+    }
+
+    private Retry createRetry() {
+        //Retry config
+        RetryConfig config = RetryConfig
+                .custom()
+                .maxAttempts(25)
+                .waitDuration(Duration.ofSeconds(2))
+                .build();
+
+        //Retry Registry
+        RetryRegistry registry = RetryRegistry.of(config);
+
+        //Retry Instance
+        Retry retry = registry.retry("app-retry");
+
+        retry.getEventPublisher()
+                .onRetry(r -> System.out.println("Retrying..... : " + r.getNumberOfRetryAttempts()))
+                .onSuccess(e -> System.out.println("Retry success!!! : " + e.getNumberOfRetryAttempts()))
+                .onError(e -> System.out.println("Retry error : " + e.getNumberOfRetryAttempts()));
+
+        return retry;
+    }
+
+    //configuration methods
+    private Bulkhead createBulkhead(int maxConcurrent) {
+        //Configuration
+        BulkheadConfig bulkheadConfig = BulkheadConfig
+                .custom()
+                .maxConcurrentCalls(maxConcurrent)
+                .build();
+        //Registry if want ; optional
+        //create BulkHead object with configuration.
+        Bulkhead bulkhead = Bulkhead.of("bulkhead-app", bulkheadConfig);
+
+        //add bulk head events to watch, bulk head operations.
+        bulkhead.getEventPublisher()
+                .onCallPermitted(event -> LOGGER.info("Call Permitted"))
+                .onCallRejected(event -> LOGGER.info("Call Rejected"))
+                .onCallFinished(event -> LOGGER.info("Call Completed"));
+
+        return bulkhead;
+    }
+
+    @GetMapping()
+    public String okay() {
+        return "The message of Provider Api  " + restTemplate.getForObject(providerUri, String.class);
+    }
+
+    //End point to simulate bulk head
+    @GetMapping("/bulkhead")
+    public String bulkHeadEndPoint() {
+        //decoration only
+        CheckedFunction0<String> someServiceCall = Bulkhead.decorateCheckedSupplier(bulkhead, () -> {
+            //wrap remote api call.
+            return "The message was " + restTemplate.getForObject(providerUri + "/slow", String.class);
+        });
+        //Result Handler : you may get result or Failure
+        Try<String> result = Try
+                .of(someServiceCall)
+                .recover((throwable) -> "This is a bulkhead fallback : You may return cached Response");
+        //execute the method
+        return result.get(); //which tri
+
+    }
+
+    //Retry end point
+
+    @GetMapping("/retry")
+    public String retry() throws Exception {
+        CheckedFunction0<String> retryableSupplier = Retry.decorateCheckedSupplier(retry, () -> {
+            return "The message was " + restTemplate.getForObject(providerUri, String.class);
+        });
+        Try<String> result = Try.of(retryableSupplier)
+                .recover((throwable) -> "Hello world from recovery function");
+        return result.get();
+    }
+
+    @GetMapping("/timeout")
+    public String timeoutEndPoint() throws Exception {
+        //Timeout code has to be wrapped inside Future.
+        String result = timeLimiter.executeFutureSupplier(
+                () -> CompletableFuture.supplyAsync(() -> "The message was " + restTemplate.getForObject(providerUri + "/slow", String.class)));
+        return result;
+    }
+
+    @GetMapping("/circuitbreaker")
+    public String circuitBreakerFail(@RequestParam boolean shouldFail) {
+        if (shouldFail) {
+            return callServiceViaCircuitBreaker("/error");
+        } else {
+            return callServiceViaCircuitBreaker("/");
+        }
+    }
+    private String callServiceViaCircuitBreaker(String uri) {
+        CheckedFunction0<String> someServiceCall = CircuitBreaker.decorateCheckedSupplier(circuitBreaker,
+                () -> "The message was " + restTemplate.getForObject(providerUri + uri, String.class));
+        Try<String> result = Try.of(someServiceCall)
+                .recover((throwable) -> "This is a circuit breaker fallback");
+        return result.get();
+    }
+
+
+}
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Annotation Based Programming:
+............................
+
+-Annotation are used to decorate methods where you are going to call third party
+apis
+
+-application.properties /yml file can be used to supply configurations.
+ -CB,TIMO,BH....
+
+ Metrics Module:
+ 
+ 
+ Why metrics:
+
+ ->Monitoring system
+
+ Eg:
+   - how many cb open state
+   -  how many cb closed state
+   - how many concurrent calls
+ 
+ MeterRegistry meterRegistry = new SimpleMeterRegistry();
+CircuitBreakerRegistry circuitBreakerRegistry =
+  CircuitBreakerRegistry.ofDefaults();
+CircuitBreaker foo = circuitBreakerRegistry
+  .circuitBreaker("backendA");
+CircuitBreaker boo = circuitBreakerRegistry
+  .circuitBreaker("backendB");
+
+TaggedCircuitBreakerMetrics
+  .ofCircuitBreakerRegistry(circuitBreakerRegistry)
+  .bindTo(meterRegistry)
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+
+
+What is Reactive Programming ?
+
+ Programming Paradigm(way) like oo,fp,pro
+
+What is Reactive?
+
+  Oxford dictionary defines reactive  as "showing a response to a stimulus"
+
+Response :  The result
+Stimuls : trigger/actions ---Events
+
+ Get Response because of some events --- event driven programming model.
+
+Event dirven programming is extension of  oo:Observable Design pattern.
+
+Reactive programming is collection of many design patterns and principles.
+
+ -Observable Design pattern
+ -Iterator Design pattern
+ -Functional style pattern
+
+
+
+-Observable Design pattern
+				
+				Publisher/Owner/Producer
+					|
+	      -----------------------------------------------------------------			
+	     |                   |          |           |
+          Listeners            Subscriber  Subscriber Subscriber
+			
+
+
+How objects communicate
+
+      
+  By passing messages via method calls with intermediate object (Event).
+
+
+Publisher sends/publishes data with events via broker called notfication interface to subcribers
+
+
+
+          	Publisher/Owner/Producer
+					|
+			 data + event(Event)
+					|
+		Event Notification Interface
+					|
+	      -----------------------------------------------------------------			
+	     |                   |          |           |
+          Listeners            Subscriber  Subscriber Subscriber
+
+
+Subscribers are objects who are listening for events, once event is given, who process event and consume take.
+
+
+Problems of existing Observable Pattern:
+.........................................
+
+Legacy observer design pattern has only 1 thing
+
+  1.they will be able to send only data
+
+Have not addresssed the following
+  1.what if error is produced
+  2.what if the producer has stopped producing values. 
+
+Reactive programming address the above issues.
+
+Producer can send data,error, complete - events/signals
+
+	Publisher/Owner/Producer <---------Data Source(Device)
+					|
+				 data / error  & complete
+					|
+			       Event Notification Interface
+					|
+			------------------------------------- channels
+			|               |                  |
+                     data              error              complete
+
+			|		|		   |
+			------------------------------------
+					  |
+				      Subscriber
+			
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Iterator Design Pattern design:
+
+				   DataSource-List/Collection -Object
+				    (1,2,3,4,5,6,7,8,9,10)
+					  |
+					Iterator - PULL Alogorthim- get/read/request(N)
+					   |
+				   Subscribers
+
+PULL Based iterator , is default iterator already implemented in many languages.
+
+
+Drawbacks of pull based iterator :
+
+1.both object should sync each other.
+2.only data will be pulled via iterator.next/get/read/request call
+3.Errors are handled via try...catch.
+4.No complete signal is given.
+5.all data must be loaded in advance- memory waste
+6.live data may not be processed on fly.
+
+Publisher/Owner/Producer <---------Data Source(Device)
+					|
+				  push data into memory over time.
+					|
+				  -----------------------------
+                                      1---2---3--4--error--5--|-->
+				  ------------------------------
+                        		|    
+				     emit event data,data -complete           	
+			
+				 data / error  & complete
+					|
+			       Event Notification Interface
+					|
+			------------------------------------- channels
+			|               |                  |
+                     data              error              complete
+
+			|		|		   |
+			------------------------------------
+					  |
+				      Subscriber
+When error or complete signal is given, channel will be closed.
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+Reactive Programs are functional style based.
+
+ -Pure functions
+ -Immutablity
+ -Higher order functions: function composition.
+
+ &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Reactive  = {observable + iterator(push + pull=Reactive PUSH) + functional style} 
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Application of Reactive Programming:
+....................................
+
+                             DATA Movement -IO
+                             DATA PROCESSING - BIZ LOGIC
+                             DATA STORAGE - DATA STORE
+
+DATA MOVEMENT IN HTTP CHANNEL:
+DataBase Server -100 rows
+  |
+read
+ |
+Web Server ----writes into HTTP Channel------------------Delivered to Clients
+
+
+all 100 rows written into http and flushed to clients : traditional io
+
+row by row written and delivered to client row by row : streaming.
+--------------------------------------------------------------------------------
+
+Processing Data :
+
+Lets say I have list of Employee Objects.
+List?
+
+- I want to convert all employee names in uppercase
+- I want to filter employees who's salary is less than 100k
+- I want to filter those employees rating should be greater than 5
+- print all the employee name and department.
+
+
+Reactive is just spec, what about implementation? who has given this implementation.
+
+Reactive spec initally implemented not as open source project , by netflex ->
+  RxJava 1.0 - open source.
+ 
+
+**********************************************************************************************
+
+Once Rxjava other extensions came into market,peopel started building reactive application.
+
+one point of time, people had confusion.
+
+Whether my system is Reactive?
+
+Many companies like ms,google,netflex,amzon....joined together who published one spec
+https://www.reactivemanifesto.org/
+**********************************************************************************************
+Where is reactive Programming ? Use case of Reactive Programming?
+
+
+   ********Data  Streaming and Processing in blocking and nonblocking *******
+
+Data Processing  y comapare with Batch processing.....
+
+Pipe lines : streaming of data.
+
+Stream :
+
+     Sequence of data / flow of data which is supplied and consumed
+
+
+Stream Types:
+
+1.Source Stream
+2.Intermediate Stream 
+
+ ->Up Stream
+ ->Down Stream
+********************************************************************************************
+
+Core Concepts in Reactive Programming:
+......................................
+
+1.Publisher
+   Publisher is Object
+2.Subscriber
+   Subscriber is also Object
+3.Stream
+  logical representation of data movement
+
+Java and Reactive Programming implementation:
+  Reactive programming spec 
+
+1.Rxjava 1.x
+2.Rxjava 2.x ,Rx 3.x
+3.Project Reactor
+4.Java 9
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Programming implementation:
+
+Select Framework / Lib:
+
+-> RXJAVA
+
+-> Project Reactor.
+
+
+Publisher
+  1.Observable
+	 2.Subject
+	    AsyncSubject...
+  	 3.Single
+         4.MayBe
+
+2.Observer
+   Subscriber who is listening for data.
+
+
+3.Operators
+    Operators are methods in java, which performes some data processing operations.
+
+Operators are like work stations in "assembly line analogy". Operators forms upstream and downstream.
+
+
+Steps:
+1.data source , where data is available ; primtives,array,list,...
+2.Observable - Source Stream
+ -create Stream/Observable
+ factory apis:
+   -create
+   -other factory methods
+3.subscription
+
+processing data
+
+1.data source , where data is available ; primtives,array,list,...
+2.Observable - Source Stream
+ -create Stream/Observable
+ factory apis:
+   -create
+   -other factory methods
+
+3.processing data using operators- filter,map,zip,....
+   -forms up stream and down stream.
+
+4.subscription
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+package com.ibm.reactive;
+
+import io.reactivex.rxjava3.core.Observable;
+
+public class StreamProcessing {
+    //Stream Processing
+    public static void processStreams() {
+        //create of data
+        Observable<Integer> stream = Observable
+                .just(1, 2, 3, 4, 5, 6, 7) //source /upstream
+                .map(x -> x * 2) //down stream / upstream
+                .filter(i -> i < 10); //down stream /upstream
+
+        //subscriber
+        stream.subscribe(data -> System.out.println(data), err -> System.out.println(err), () -> {
+            System.out.println("Stream completed");
+        });
+    }
+
+    public static void main(String[] args) {
+        processStreams();
+    }
+}
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+UpStream
+ sends data in sequence to next stream
+Down Stream
+ The streams Receives data from upstream
+
+ A----B
+Back Pressure:
+ up stream is fast,down stream slow
+   -data inconsistency
+   -data loss
+   -low latency
+   etc....
+How to handle back pressure?
+
+ adding buffer , processing 
+
+We have many algorthim
+  -Buffer
+  -Elimentates
+........
+
+Observable is object has no Buffer  feature by default.
+
+
+Rxjava2 introduced new Object eq to Observable---Flowable.
+
+There is spec which talks about standard back pressure solution
+                         "Reactive Streams"
+             
+Reactive Streams is an initiative to provide a standard for asynchronous stream processing with non-blocking back pressure.
+
+Reactive Streams is an initiative to provide a standard for asynchronous stream processing with non-blocking back pressure. This encompasses efforts aimed at runtime environments (JVM and JavaScript) as well as network protocols.
+
+
+The Team provided common spec:
+
+1.Publisher
+2.Subscriber
+3.Subscription
+4.Processor
+
+Rxjava Back Pressure Implementation:
+  Flowable<Integer> flowable = Flowable.just(1, 2, 3, 4);
+        flowable.subscribe(System.out::println, System.out::println, () -> {
+            System.out.println("Back Pressured");
+        });
+    }
+Non Blocking and Async Programming:
+...................................
+package com.ibm.reactive;
+
+import io.reactivex.rxjava3.core.Observable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+
+public class NonBlocking {
+    public static void main(String[] args) throws InterruptedException {
+        Observable.just("Hello")
+                .observeOn(Schedulers.newThread())
+                .map(String::toUpperCase)
+                .doOnNext(d -> {
+                    System.out.println(Thread.currentThread().getName());
+                })
+                .observeOn(Schedulers.newThread())
+                .subscribe(s->{
+                    System.out.println(Thread.currentThread().getName());
+                });
+
+        Thread.sleep(500);
+    }
+}
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+    Birth of Project Reactor
+
+
+Project Reactor born with 
+- simple , meaning full Publisher apis
+- BackPressure Ready
+- Non Blocking Ready-Netty Engine Engine
+- fully reactive stream implementation
+
+How Project Reactor Handles BackPressure:
+
+  "Defered pull-push" : Reactive pull
+
+ Defered means "postphone/dealy" : consumer can delay consuming data.
+ Consumer can tell producer give N elements only.
+
+Project Reactor has slogon ----->  "Nothing happens until you subscribe"
+
+Pull because at the subscription and request steps, the Subscriber will send a signal to producer /upstream up to the source and essentially pull the next chunk of data
+
+  Producer pushes data , where consumer pulls data 
+
+*********************************************************************************************
+
+Objects
+
+1.Flux ---->Flowable --- o..to N
+2.Mono --- Flowable ---- o-1
+3.Operators
+4.Schedulers
+
+package com.ibm.reactive;
+
+import io.reactivex.rxjava3.core.Observable;
+
+public class StreamProcessing {
+    //Stream Processing
+    public static void processStreams() {
+        //create of data
+        Observable<Integer> stream = Observable
+                .just(1, 2, 3, 4, 5, 6, 7) //source /upstream
+                .map(x -> x * 2) //down stream / upstream
+                .filter(i -> i < 10); //down stream /upstream
+        //subscriber
+        stream.subscribe(data -> System.out.println(data), err -> System.out.println(err), () -> {
+            System.out.println("Stream completed");
+        });
+    }
+
+    public static void main(String[] args) {
+        processStreams();
+    }
+}
+
+package com.ibm.reactive;
+
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Flux;
+
+public class ProjectReactor {
+
+    public static void controlBackpressure() {
+        Flux<Integer> producer = Flux.range(1, 100);
+
+        producer.log().subscribe(new Subscriber<Integer>() {
+            @Override
+            public void onSubscribe(Subscription s) {
+                System.out.println("Subscription is done");
+                //ask the upstream how many elements you want
+                //s.request(3); //requests only 3 elements
+                //request all elements
+                s.request(10); // request(unbound)
+            }
+
+            @Override
+            public void onNext(Integer value) {
+                System.out.println("Data " + value);
+
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                System.out.println("Error  " + t.getMessage());
+
+            }
+
+            @Override
+            public void onComplete() {
+                System.out.println("Completed ");
+
+            }
+        });
+    }
+
+    public static void main(String[] args) {
+        Flux<String> producer = Flux.create(fluxSink -> {
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.complete();
+
+        });
+        producer.log().subscribe();
+
+        Flux<Integer> justproducer = Flux.just(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        justproducer.log().subscribe();
+
+        Flux<Integer> rangeProducer = Flux.range(1, 100);
+        rangeProducer.log().subscribe();
+
+        controlBackpressure();
+    }
+}
+
+package com.ibm.reactive;
+
+import io.reactivex.rxjava3.core.Observable;
+
+import java.util.Arrays;
+import java.util.List;
+
+public class StreamCreation {
+    public static void createoperator() {
+        //create method : push data- emit data event, push error - error event is emitted,complete
+        Observable<Integer> stream = Observable.create(observer -> {
+            //push
+            observer.onNext(1);
+            observer.onNext(2);
+            //observer.onError(new RuntimeException("Errr"));
+            observer.onNext(3);
+            observer.onComplete();
+
+        });
+
+        //subscriber
+        stream.subscribe(data -> System.out.println(data), err -> System.out.println(err), () -> {
+            System.out.println("Stream completed");
+        });
+    }
+
+    public static void createStramingUsingJust() {
+        //create of data
+        Observable<Integer> stream = Observable.just(1, 2, 3, 4, 5, 6, 7);
+        //subscriber
+        stream.subscribe(data -> System.out.println(data), err -> System.out.println(err), () -> {
+            System.out.println("Stream completed");
+        });
+    }
+
+    public static void createStramingUsingArray() {
+        //create of data
+        int[] list = {1, 2, 3, 4, 5, 6, 7};
+        Observable<int[]> stream = Observable.fromArray(list);
+        //subscriber
+        stream.subscribe(data -> {
+            System.out.println(data[0]);
+        }, err -> System.out.println(err), () -> {
+            System.out.println("Stream completed : Int Array");
+        });
+    }
+
+    public static void createStramingUsingList() {
+        //create of data
+        Integer[] array = {1, 2, 3, 4, 5, 6, 7};
+        List<Integer> mylist =Arrays.asList(array);
+        Observable stream = Observable.fromIterable(mylist);
+        //subscriber
+        stream.subscribe(data -> {
+            System.out.println(data);
+        }, err -> System.out.println(err), () -> {
+            System.out.println("Stream completed : List Array");
+        });
+    }
+    public static void main(String[] args) {
+//        createoperator();
+//        createStramingUsingJust();
+//        createStramingUsingArray();
+        createStramingUsingList();
+    }
+}
+
+package com.ibm.reactive;
+
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Flux;
+
+public class ProjectReactor {
+
+    public static void controlBackpressure() {
+        Flux<Integer> producer = Flux.range(1, 100);
+
+        producer.log().subscribe(new Subscriber<Integer>() {
+            @Override
+            public void onSubscribe(Subscription s) {
+                System.out.println("Subscription is done");
+                //ask the upstream how many elements you want
+                //s.request(3); //requests only 3 elements
+                //request all elements
+                s.request(10); // request(unbound)
+            }
+
+            @Override
+            public void onNext(Integer value) {
+                System.out.println("Data " + value);
+
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                System.out.println("Error  " + t.getMessage());
+
+            }
+
+            @Override
+            public void onComplete() {
+                System.out.println("Completed ");
+
+            }
+        });
+    }
+
+    public static void main(String[] args) {
+        Flux<String> producer = Flux.create(fluxSink -> {
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.next("Hello reactor");
+            fluxSink.complete();
+
+        });
+        producer.log().subscribe();
+
+        Flux<Integer> justproducer = Flux.just(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        justproducer.log().subscribe();
+
+        Flux<Integer> rangeProducer = Flux.range(1, 100);
+        rangeProducer.log().subscribe();
+
+        controlBackpressure();
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
 
 
 
